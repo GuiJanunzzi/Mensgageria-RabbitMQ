@@ -1,0 +1,63 @@
+Etapa 1 -
+
+Suponha que você está desenvolvendo um sistema de proces­samento de imagens / geração de miniaturas / filtros para fotos:
+
+- Um serviço **UploadService** recebe uploads de imagens dos usuários.
+- Após receber, ele **publica uma mensagem** “ImagemRecebida” com metadados (nome do arquivo, caminho, ID do usuário).
+- Outro serviço, **ThumbnailService**, consome essa mensagem, gera uma miniatura da imagem e salva em local específico.
+- Outro serviço, **FiltroService**, também pode consumir “ImagemRecebida” (ou uma nova mensagem “ImagemProcessada”) para aplicar filtros adicionais, marca d’água, etc.
+
+1. Descreva, em poucas frases, o fluxo que ocorreria se usássemos HTTP síncrono entre UploadService e ThumbnailService. Que desvantagens você enxerga nesse modelo (latência, bloqueio, falhas, escalabilidade)?
+R:O UploadService receberia a imagem e faria uma chamada HTTP direta para o ThumbnailService. Isso aumentaria a latência e causaria bloqueios, pois o UploadService ficaria parado até finalizar o processo com o ThumbnailService. Pode também acabar gerando falhas em cascata, pois se o thumbnail falhar o upload também, e também dificulta a escalabilidade
+
+2. No contexto da mensageria, se o ThumbnailService estiver indisponível (por manutenção ou falha), o que você espera que aconteça com as mensagens “ImagemRecebida”? Como isso ajuda a robustez do sistema?
+R: As mensagens irão ficar na fila até esse sistema retornar, isso garante que o sistema não irá perder informações durante esse período de instabilidade
+
+3. Qual serviço (UploadService, ThumbnailService ou FiltroService) é mais indicado para atuar como produtor (“ImagemRecebida”) e quais como consumidores? Por quê?
+R: O UploadService é o produtor, pois ele gera o evento ao receber a imagem. ThumbnailService e FiltroService são consumidores, pois reagem a esse evento para executar suas tarefas de forma independente, sem que um precise conhecer o outro
+
+4. Se quisermos aplicar um filtro só para imagens de alta resolução (ex: largura > 2000px), como você estruturaria routing key / bindings para que apenas os serviços interessados recebam essas mensagens?
+R: O UploadService publicaria a mensagem com uma routing key descritiva, como imagem.alta_resolucao ou imagem.baixa_resolucao. O FiltroService criaria um binding para escutar apenas as mensagens com a chave imagem.alta_resolucao, ignorando as demais
+
+5. Considere que ThumbnailService já gerou a miniatura e manda mensagem “ThumbnailPronta”. FiltroService quer “escutar” apenas após miniatura pronta. Como você organizaria esse fluxo com filas/exchanges para evitar disparar filtros antes de a miniatura existir?
+R: O ThumbnailService, após terminar, publicaria uma nova mensagem (“ThumbnailPronta”) em uma exchange. O FiltroService seria configurado para consumir mensagens dessa nova fila, garantindo que ele só atue depois que a miniatura for gerada com sucesso
+
+Etapa 3 -
+
+1. Desafio enfrentado
+A parte mais desafiadora foi entender a relação abstrata entre Exchange, Queue e Binding. Por representarem infraestrutura e não uma lógica de código direta, o fluxo não é óbvio no começo.
+
+2. Acerto ou insight
+O grande "clique" foi a simplicidade do RabbitTemplate.convertAndSend. Ver que uma única linha de código lida com conexão, serialização para JSON e envio da mensagem, escondendo toda a complexidade, fez tudo fazer sentido.
+
+3. Possível falha futura
+A falha mais provável é o broker RabbitMQ estar indisponível, o que causaria um erro 500 na API e a perda da mensagem. Para tratar isso, eu implementaria um mecanismo de retry para falhas temporárias ou o padrão Outbox para garantir a entrega.
+
+4. Melhoria incremental
+Em 10-15 minutos, eu implementaria os Publisher Confirms. Isso mudaria o envio de "atire e esqueça" para um modelo confiável, onde meu produtor recebe uma confirmação (ack) de que o broker realmente recebeu a mensagem.
+
+5. Expectativa para a próxima etapa
+Minha maior expectativa para o consumidor é aprender como funciona o acknowledgment (ack/nack). Quero entender como garantir que uma mensagem não seja perdida se o consumidor falhar durante o processamento e como lidar com mensagens que causam erros constantes, talvez usando uma Dead Letter Queue (DLQ).
+
+Etapa 4 - 
+
+1. Comportamento observado
+Não, no início falhou com uma MessageConversionException. Após configurar o conversor JSON na factory do listener, sim, funcionou como esperado, exibindo os logs de "mensagem recebida" e "enviando ACK".
+
+2. Desserialização e correspondência de tipos
+A desserialização falhou porque a SimpleRabbitListenerContainerFactory customizada não tinha o Jackson2JsonMessageConverter configurado, fazendo-a voltar para o conversor padrão que não entende JSON. A solução foi adicioná-lo explicitamente à factory.
+
+3. Falhas potenciais no consumidor
+No modo padrão (AUTO), uma exceção causaria um loop infinito de reprocessamento. Testei um cenário de erro com nossa configuração manual e observei que a mensagem foi rejeitada (nack) com requeue=false, o que evitou o loop e descartou a mensagem corretamente.
+
+4. Controle de ack / nack e requeue
+Sim, configurei o ack manual. Usaria requeue = true para erros temporários (falha de rede) e requeue = false para erros permanentes (dados inválidos). O principal risco do modo automático é o loop infinito de erros.
+
+5. Escalabilidade / concorrência
+O consumidor reagiria bem, pois a concorrência foi configurada para escalar de 1 a 5 threads (setConcurrentConsumers). Isso permite processar mais mensagens em paralelo automaticamente sob alta carga, evitando sobrecarga.
+
+6. Melhorias futuras
+A melhoria mais importante seria implementar uma Dead Letter Queue (DLQ). Isso evitaria a perda de mensagens que falham, enviando-as para uma fila separada para análise e possível reprocessamento.
+
+7. Integração com produtor / visão de fluxo completo
+As principais fragilidades são a perda de mensagens se o produtor falhar ao enviar (fire-and-forget) ou se o consumidor rejeitar permanentemente. Para mais robustez, adicionaria Publisher Confirms no produtor e uma Dead Letter Queue (DLQ) no consumidor.
